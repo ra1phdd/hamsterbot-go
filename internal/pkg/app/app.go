@@ -18,6 +18,7 @@ import (
 	"hamsterbot/pkg/db"
 	"hamsterbot/pkg/logger"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -66,49 +67,6 @@ func InitBot(TelegramAPI string, a *App) {
 		logger.Error("бот")
 	}
 
-	a.users = usersService.New()
-	a.payments = paymentsService.New(a.users)
-	a.mutes = mutesService.New(a.users)
-	a.plays = playsService.New(a.users)
-
-	users := users.Endpoint{User: a.users}
-	mwUsers := middleware.Endpoint{Bot: b, User: a.users}
-	payments := payments.Endpoint{Payment: a.payments}
-	mutes := mutes.Endpoint{Mute: a.mutes}
-	plays := plays.Endpoint{Play: a.plays}
-
-	b.Use(mwUsers.IsUser)
-
-	b.Handle("/help", func(c tele.Context) error {
-		c.Send("🚀 Базовые команды\n" +
-			"/user <username> - Посмотреть информацию о пользователе\n" +
-			"/pay <username> <amount> - Перевести необходимую сумму пользователю\n" +
-			"/mute <username> <duration> - Замутить пользователя на какое-то количество времени (формат - 5s/11m/23h)\n" +
-			"/unmute <username> - Размутить пользователя\n\n" +
-			"🎰 Мини-игры\n" +
-			"/slots <amount> - Сыграть в казино (коэффициенты от x2 до x100❗️)\n" +
-			"/steal <username> <amount> - Украсть сумму у пользователя (чем больше сумма, тем ниже шанс)")
-		return nil
-	})
-
-	b.Handle("/user", users.GetUserData)
-	b.Handle("/pay", payments.PayHandler)
-	b.Handle("/mute", mutes.MuteHandler)
-	b.Handle("/unmute", mutes.UnmuteHandler)
-	b.Handle("/slots", plays.SlotsHandler)
-	b.Handle("/steal", plays.StealHandler)
-
-	b.Handle(tele.OnText, func(c tele.Context) error { return nil })
-	b.Handle(tele.OnAudio, func(c tele.Context) error { return nil })
-	b.Handle(tele.OnCallback, func(c tele.Context) error { return nil })
-	b.Handle(tele.OnDocument, func(c tele.Context) error { return nil })
-	b.Handle(tele.OnEdited, func(c tele.Context) error { return nil })
-	b.Handle(tele.OnMedia, func(c tele.Context) error { return nil })
-	b.Handle(tele.OnPhoto, func(c tele.Context) error { return nil })
-	b.Handle(tele.OnSticker, func(c tele.Context) error { return nil })
-	b.Handle(tele.OnVideo, func(c tele.Context) error { return nil })
-	b.Handle(tele.OnVoice, func(c tele.Context) error { return nil })
-
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
@@ -116,6 +74,8 @@ func InitBot(TelegramAPI string, a *App) {
 		// Запуск функции сразу при запуске приложения
 		if err := a.users.IncrementAllUserBalances(); err != nil {
 			log.Fatalf("не удалось обновить баланс всех пользователей: %v", err)
+		} else {
+			log.Println("баланс всех пользователей успешно обновлен")
 		}
 
 		for {
@@ -130,6 +90,66 @@ func InitBot(TelegramAPI string, a *App) {
 			}
 		}
 	}()
+
+	a.users = usersService.New()
+	a.payments = paymentsService.New(a.users)
+	a.mutes = mutesService.New(a.users)
+	a.plays = playsService.New(a.users)
+
+	users := users.Endpoint{User: a.users}
+	mwUsers := middleware.Endpoint{Bot: b, User: a.users}
+	payments := payments.Endpoint{Payment: a.payments}
+	mutes := mutes.Endpoint{Mute: a.mutes}
+	plays := plays.Endpoint{Play: a.plays}
+
+	b.Use(mwUsers.IsUser)
+
+	b.Handle("/help", func(c tele.Context) error {
+		err := c.Send("🚀 Базовые команды\n" +
+			"/user <username> - Посмотреть информацию о пользователе\n" +
+			"/pay <username> <amount> - Перевести необходимую сумму пользователю\n" +
+			"/mute <username> <duration> - Замутить пользователя на какое-то количество времени (формат - 5s/11m/23h)\n" +
+			"/unmute <username> - Размутить пользователя\n\n" +
+			"🎰 Мини-игры\n" +
+			"/slots <amount> - Сыграть в казино (коэффициенты от x2 до x100❗️)\n" +
+			"/steal <username> <amount> - Украсть сумму у пользователя (чем больше сумма, тем ниже шанс)")
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+
+	b.Handle("/user", users.GetUserData)
+	b.Handle("/pay", payments.PayHandler)
+	b.Handle("/payd", payments.PayAdmHandler)
+	b.Handle("/mute", mutes.MuteHandler)
+	b.Handle("/unmute", mutes.UnmuteHandler)
+	b.Handle("/slots", plays.SlotsHandler)
+	b.Handle("/steal", plays.StealHandler)
+	b.Handle("/send", func(c tele.Context) error {
+		if c.Sender().ID != 1230045591 {
+			return nil
+		}
+
+		args := c.Args()
+
+		chatID := int64(-1002138316635)
+
+		// Используем метод Send у объекта бота для отправки сообщения
+		_, err := c.Bot().Send(tele.ChatID(chatID), strings.Join(args, " "))
+		return err
+	})
+
+	b.Handle(tele.OnText, func(c tele.Context) error { return nil })
+	b.Handle(tele.OnAudio, func(c tele.Context) error { return nil })
+	b.Handle(tele.OnCallback, func(c tele.Context) error { return nil })
+	b.Handle(tele.OnDocument, func(c tele.Context) error { return nil })
+	b.Handle(tele.OnEdited, func(c tele.Context) error { return nil })
+	b.Handle(tele.OnMedia, func(c tele.Context) error { return nil })
+	b.Handle(tele.OnPhoto, func(c tele.Context) error { return nil })
+	b.Handle(tele.OnSticker, func(c tele.Context) error { return nil })
+	b.Handle(tele.OnVideo, func(c tele.Context) error { return nil })
+	b.Handle(tele.OnVoice, func(c tele.Context) error { return nil })
 
 	b.Start()
 }

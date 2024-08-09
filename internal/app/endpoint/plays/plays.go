@@ -9,8 +9,8 @@ import (
 )
 
 type Play interface {
-	Slots(username string, amount int) (bool, []string, int, int, error)
-	Steal(to string, from string, amount int) (bool, int, error)
+	Slots(id int64, amount int) (bool, []string, int, int64, error)
+	Steal(to string, from string, amount int) (bool, int64, error)
 }
 
 type Endpoint struct {
@@ -37,7 +37,7 @@ func (e *Endpoint) SlotsHandler(c telebot.Context) error {
 		return c.Send("Ошибка: число не может быть отрицательным.")
 	}
 
-	win, result, amount, balance, err := e.Play.Slots(c.Sender().Username, oldAmount)
+	win, result, amount, balance, err := e.Play.Slots(c.Sender().ID, oldAmount)
 	if err != nil {
 		if err.Error() == "недостаточно средств" {
 			return c.Send(fmt.Sprintf("Ошибка: %s. Ваш текущий баланс: %d зеток.", err.Error(), balance))
@@ -54,6 +54,7 @@ func (e *Endpoint) SlotsHandler(c telebot.Context) error {
 	resultMsg += fmt.Sprintf("Ваш баланс: %d", balance)
 
 	return c.Send(resultMsg)
+
 }
 
 func (e *Endpoint) StealHandler(c telebot.Context) error {
@@ -91,7 +92,7 @@ func (e *Endpoint) StealHandler(c telebot.Context) error {
 		return c.Send("Ошибка: число не может быть отрицательным.")
 	}
 
-	win, balance, err := e.Play.Steal(c.Sender().Username, username, amount)
+	win, balance, err := e.Play.Steal(username, c.Sender().Username, amount)
 	if err != nil {
 		return c.Send(fmt.Sprintf("Ошибка: %s.", err.Error()))
 	}

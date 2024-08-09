@@ -9,8 +9,8 @@ import (
 )
 
 type Mute interface {
-	Mute(from string, to string, durationStr string) (int, int, error)
-	Unmute(from string, to string) (int, int, error)
+	Mute(from string, to string, durationStr string) (int64, int, error)
+	Unmute(from string, to string) (int64, int, error)
 }
 
 type Endpoint struct {
@@ -33,10 +33,10 @@ func (e *Endpoint) MuteHandler(c telebot.Context) error {
 	}
 
 	logger.Debug("Получение аргументов", zap.String("username", username), zap.String("duration", duration))
-	balance, amount, err := e.Mute.Mute(c.Sender().Username, username, duration)
+	balance, amount, err := e.Mute.Mute(username, c.Sender().Username, duration)
 	if err != nil {
 		if err.Error() == "недостаточно средств" {
-			return c.Send(fmt.Sprintf("Ошибка: %s. Ваш текущий баланс: %d зеток.", err.Error(), balance))
+			return c.Send(fmt.Sprintf("Ошибка: %s. Не хватает %d зеток, ваш текущий баланс: %d зеток.", err.Error(), int64(amount)-balance, balance))
 		}
 		return c.Send(fmt.Sprintf("Ошибка: %s.", err.Error()))
 	}
@@ -65,7 +65,7 @@ func (e *Endpoint) UnmuteHandler(c telebot.Context) error {
 	balance, amount, err := e.Mute.Unmute(c.Sender().Username, username)
 	if err != nil {
 		if err.Error() == "недостаточно средств" {
-			return c.Send(fmt.Sprintf("Ошибка: %s. Ваш текущий баланс: %d зеток.", err.Error(), balance))
+			return c.Send(fmt.Sprintf("Ошибка: %s. Не хватает %d зеток, ваш текущий баланс: %d зеток.", err.Error(), int64(amount)-balance, balance))
 		}
 		return c.Send(fmt.Sprintf("Ошибка: %s.", err.Error()))
 	}

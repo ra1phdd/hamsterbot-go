@@ -2,11 +2,10 @@ package users
 
 import (
 	"fmt"
-	"go.uber.org/zap"
 	"gopkg.in/telebot.v3"
-	"hamsterbot/pkg/cache"
-	"hamsterbot/pkg/logger"
+	"hamsterbot/internal/app/models"
 	"strings"
+	"time"
 )
 
 type User interface {
@@ -38,25 +37,21 @@ func (e *Endpoint) GetUserData(c telebot.Context) error {
 
 	data, err := e.User.GetUserByUsername(username)
 	if err != nil {
-		return err
+		return c.Send("Ошибка: " + err.Error())
 	}
 
-	var messageSend string
-	cacheKey := fmt.Sprintf("mute:%d", data["id"].(int64))
-
-	exists, err := cache.Rdb.Exists(cache.Ctx, cacheKey).Result()
-	if err != nil {
-		logger.Warn("Ошибка проверки наличия ключа в кеше", zap.Error(err))
-	}
-	if exists != 0 {
-		time, err := cache.Rdb.Get(cache.Ctx, cacheKey).Result()
+	messageSend := fmt.Sprintf("📌 Информация о пользователе @%s:\n\n👉 LVL: %d ур.\n👉 Баланс: %d зеток\n👉 Доход: %d зеток/ч", strings.Trim(username, "@"), data["lvl"].(int64), data["balance"].(int64), data["income"].(int64))
+	if data["mute"].(models.Mute) != (models.Mute{}) {
+		jsonStartMute, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", data["mute"].(models.Mute).StartMute)
 		if err != nil {
-			return err
+			return c.Send("Ошибка: " + err.Error())
 		}
+		jsonDuration := time.Duration(data["mute"].(models.Mute).Duration)
 
-		messageSend = fmt.Sprintf("📌 Информация о пользователе @%s:\n👉 Баланс: %d\n👉 Блокировка будет снята %s (UTC)", strings.Trim(username, "@"), data["balance"].(int), time)
-	} else {
-		messageSend = fmt.Sprintf("📌 Информация о пользователе @%s:\n👉 Баланс: %d", strings.Trim(username, "@"), data["balance"].(int))
+		location := time.FixedZone("UTC+3", 3*60*60)
+		endTime := jsonStartMute.Add(jsonDuration).In(location).Format("2006-01-02 15:04:05")
+
+		messageSend += fmt.Sprintf("\n👉 Блокировка будет снята %s", endTime)
 	}
 
 	return c.Send(messageSend)

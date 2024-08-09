@@ -1,10 +1,9 @@
 package middleware
 
 import (
-	"fmt"
 	"go.uber.org/zap"
 	tele "gopkg.in/telebot.v3"
-	"hamsterbot/pkg/cache"
+	"hamsterbot/internal/app/models"
 	"hamsterbot/pkg/logger"
 	"strings"
 )
@@ -21,27 +20,22 @@ type Endpoint struct {
 
 func (e *Endpoint) IsUser(next tele.HandlerFunc) tele.HandlerFunc {
 	return func(c tele.Context) error {
+		/*if c.Sender().ID == 5953539293 && strings.Contains(c.Message().Text, "/") {
+			return c.Send("Вы заблокированы до выяснения обстоятельств.")
+		}*/
+
 		data, err := e.User.GetUserById(c.Sender().ID)
 		if err != nil {
-			return err
-		}
-
-		if len(data) == 0 {
 			err := e.User.AddUser(c.Sender().ID, c.Sender().Username)
 			if err != nil {
+				logger.Error("ошибка добавления юзера", zap.Error(err))
 				return err
 			}
 
 			return next(c)
 		}
 
-		cacheKey := fmt.Sprintf("mute:%d", c.Sender().ID)
-
-		exists, err := cache.Rdb.Exists(cache.Ctx, cacheKey).Result()
-		if err != nil {
-			logger.Warn("Ошибка проверки наличия ключа в кеше", zap.Error(err))
-		}
-		if exists != 0 {
+		if data["mute"].(models.Mute) != (models.Mute{}) {
 			err := e.Bot.Delete(c.Message())
 			if err != nil {
 				return err
@@ -51,7 +45,7 @@ func (e *Endpoint) IsUser(next tele.HandlerFunc) tele.HandlerFunc {
 		args := c.Args()
 
 		if strings.Contains(strings.Join(args, " "), "hamsteryep_bot") ||
-			(c.Message().ReplyTo != nil && c.Message().ReplyTo.Sender != nil && c.Message().ReplyTo.Sender.Username == "hamsteryep_bot") {
+			(c.Message().ReplyTo != nil && c.Message().ReplyTo.Sender != nil && c.Message().ReplyTo.Sender.Username == "hamsteryep_bot" && strings.Contains(c.Message().Text, "/")) {
 			return c.Send("Ошибка: нельзя проводить какие-либо операции над ботом.")
 		}
 
