@@ -17,6 +17,7 @@ import (
 	"hamsterbot/pkg/cache"
 	"hamsterbot/pkg/db"
 	"hamsterbot/pkg/logger"
+	"hamsterbot/pkg/metrics"
 	"log"
 	"strings"
 	"time"
@@ -39,7 +40,7 @@ func New() (*App, error) {
 
 	err = cache.Init(fmt.Sprintf("%s:%s", cfg.Redis.RedisAddr, cfg.Redis.RedisPort), cfg.Redis.RedisUsername, cfg.Redis.RedisPassword, cfg.Redis.RedisDBId)
 	if err != nil {
-		logger.Error("ошибка при инициализации кэша: ", zap.Error(err))
+		logger.Fatal("ошибка при инициализации кэша: ", zap.Error(err))
 		return nil, err
 	}
 
@@ -49,6 +50,8 @@ func New() (*App, error) {
 		return nil, err
 	}
 
+	go metrics.Init()
+
 	a := &App{}
 
 	InitBot(cfg.TelegramAPI, a)
@@ -57,6 +60,7 @@ func New() (*App, error) {
 }
 
 func InitBot(TelegramAPI string, a *App) {
+	botLogger := logger.Named("bot")
 	pref := tele.Settings{
 		Token:  TelegramAPI,
 		Poller: &tele.LongPoller{Timeout: 1 * time.Second},
@@ -64,28 +68,22 @@ func InitBot(TelegramAPI string, a *App) {
 
 	b, err := tele.NewBot(pref)
 	if err != nil {
-		logger.Error("бот")
+		botLogger.Fatal("Ошибка при создании бота", zap.Error(err))
 	}
 
 	go func() {
+		ubLogger := logger.Named("updateBalance")
+
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
-
-		// Запуск функции сразу при запуске приложения
-		if err := a.users.IncrementAllUserBalances(); err != nil {
-			log.Fatalf("не удалось обновить баланс всех пользователей: %v", err)
-		} else {
-			log.Println("баланс всех пользователей успешно обновлен")
-		}
 
 		for {
 			select {
 			case <-ticker.C:
-				err := a.users.IncrementAllUserBalances()
-				if err != nil {
-					log.Printf("не удалось обновить баланс всех пользователей: %v", err)
+				if err := a.users.IncrementAllUserBalances(); err != nil {
+					ubLogger.Error("ошибка обновления баланса пользователей", zap.Error(err))
 				} else {
-					log.Println("баланс всех пользователей успешно обновлен")
+					ubLogger.Info("баланс пользователей успешно обновлен")
 				}
 			}
 		}
@@ -94,15 +92,15 @@ func InitBot(TelegramAPI string, a *App) {
 	a.users = usersService.New()
 	a.payments = paymentsService.New(a.users)
 	a.mutes = mutesService.New(a.users)
-	a.plays = playsService.New(a.users)
+	a.plays = playsService.New(a.users, a.mutes)
 
-	users := users.Endpoint{User: a.users}
-	mwUsers := middleware.Endpoint{Bot: b, User: a.users}
-	payments := payments.Endpoint{Payment: a.payments}
-	mutes := mutes.Endpoint{Mute: a.mutes}
-	plays := plays.Endpoint{Play: a.plays}
+	mwEndpoint := middleware.Endpoint{Bot: b, User: a.users}
+	usersEndpoint := users.Endpoint{User: a.users}
+	paymentsEndpoint := payments.Endpoint{Payment: a.payments, User: a.users}
+	mutesEndpoint := mutes.Endpoint{Mute: a.mutes}
+	playsEndpoint := plays.Endpoint{Play: a.plays}
 
-	b.Use(mwUsers.IsUser)
+	b.Use(mwEndpoint.IsUser)
 
 	b.Handle("/help", func(c tele.Context) error {
 		err := c.Send("🚀 Базовые команды\n" +
@@ -111,21 +109,41 @@ func InitBot(TelegramAPI string, a *App) {
 			"/mute <username> <duration> - Замутить пользователя на какое-то количество времени (формат - 5s/11m/23h)\n" +
 			"/unmute <username> - Размутить пользователя\n\n" +
 			"🎰 Мини-игры\n" +
-			"/slots <amount> - Сыграть в казино (коэффициенты от x2 до x100❗️)\n" +
-			"/steal <username> <amount> - Украсть сумму у пользователя (чем больше сумма, тем ниже шанс)")
+			"/slots <amount> - Сыграть в казино (коэффициенты от x2 до x100 ❗)")
 		if err != nil {
 			return err
 		}
 		return nil
 	})
+	//b.Handle("/rule", playsEndpoint.Rules)
 
-	b.Handle("/user", users.GetUserData)
-	b.Handle("/pay", payments.PayHandler)
-	b.Handle("/payd", payments.PayAdmHandler)
-	b.Handle("/mute", mutes.MuteHandler)
-	b.Handle("/unmute", mutes.UnmuteHandler)
-	b.Handle("/slots", plays.SlotsHandler)
-	b.Handle("/steal", plays.StealHandler)
+	// user команды
+	b.Handle("/user", usersEndpoint.GetUserData)
+	//b.Handle("/top", usersEndpoint.TopHandler)
+	//b.Handle("/topb", func(c tele.Context) error {
+	//	return usersEndpoint.TopHandlerCommand(c, "balance")
+	//})
+	//b.Handle("/topl", func(c tele.Context) error {
+	//	return usersEndpoint.TopHandlerCommand(c, "lvl")
+	//})
+	//b.Handle("/topi", func(c tele.Context) error {
+	//	return usersEndpoint.TopHandlerCommand(c, "income")
+	//})
+	b.Handle("/bank", paymentsEndpoint.BankHandler)
+	b.Handle("/pay", paymentsEndpoint.PayHandler)
+	b.Handle("/mute", mutesEndpoint.MuteHandler)
+	b.Handle("/unmute", mutesEndpoint.UnmuteHandler)
+	b.Handle("/slots", playsEndpoint.SlotsHandler)
+	//b.Handle("/rln", playsEndpoint.RouletteNumHandler)
+	//b.Handle("/rlc", playsEndpoint.RouletteColorHandler)
+	//b.Handle("/dice", playsEndpoint.DiceHandler)
+	//b.Handle("/rsp", playsEndpoint.RockPaperScissorsHandler)
+	//b.Handle("/selfmute", playsEndpoint.SelfMuteHandler)
+	//b.Handle("/selfunmute", playsEndpoint.SelfUnmuteHandler)
+	b.Handle("/steal", playsEndpoint.StealHandler)
+
+	// adm команды
+	b.Handle("/payd", paymentsEndpoint.PayAdmHandler)
 	b.Handle("/send", func(c tele.Context) error {
 		if c.Sender().ID != 1230045591 {
 			return nil
@@ -140,6 +158,9 @@ func InitBot(TelegramAPI string, a *App) {
 		return err
 	})
 
+	// обработчики для всех типов сообщений
+	// необходимо для того, чтобы правильно работал
+	// middleware (удалял сообщения в случае мута и прочее)
 	b.Handle(tele.OnText, func(c tele.Context) error { return nil })
 	b.Handle(tele.OnAudio, func(c tele.Context) error { return nil })
 	b.Handle(tele.OnCallback, func(c tele.Context) error { return nil })

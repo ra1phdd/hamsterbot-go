@@ -13,3 +13,8 @@ type Payment struct {
 	From   int64 `json:"from"`
 	Amount int   `json:"amount"`
 }
+
+type UserTop struct {
+	Username string
+	Value    int64
+}

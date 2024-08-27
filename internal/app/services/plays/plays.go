@@ -1,44 +1,90 @@
 package plays
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+	"hamsterbot/internal/app/constants"
+	"hamsterbot/internal/app/models"
 	"hamsterbot/pkg/cache"
 	"hamsterbot/pkg/logger"
 	"math/rand"
-	"strconv"
 	"time"
 )
 
 type User interface {
 	GetUserByUsername(username string) (map[string]interface{}, error)
+	GetUserBalance(id int64) (int64, error)
 	SetUserBalance(id int64, balance int64) (int64, error)
+}
+
+type Mute interface {
+	GetAmount(typeMute string, duration time.Duration) (int, error)
+	GetDuration(durationStr string) (time.Duration, error)
 }
 
 type Service struct {
 	User User
+	Mute Mute
 }
 
-func New(User User) *Service {
+func New(User User, Mute Mute) *Service {
 	return &Service{
 		User: User,
+		Mute: Mute,
 	}
 }
 
-func (s Service) Slots(id int64, amount int) (bool, []string, int, int64, error) {
-	balanceStr, err := cache.Rdb.Get(cache.Ctx, fmt.Sprintf("user:%d:balance", id)).Result()
-	if err != nil {
-		return false, nil, 0, 0, err
+func calculateWinChance(balanceCasino, amount int64) int64 {
+	maxChance := 100            // Максимальный шанс выигрыша в процентах (100%)
+	minChance := 0              // Минимальный шанс выигрыша в процентах (0%)
+	maxBalance := int64(100000) // Баланс для 100% шанса выигрыша
+	minBalance := int64(25000)  // Баланс для 0% шанса выигрыша
+
+	chance := int64(float64(balanceCasino-minBalance) / float64(maxBalance-minBalance) * float64(maxChance-minChance))
+	if balanceCasino >= maxBalance {
+		chance = 100
 	}
-	balance, err := strconv.ParseInt(balanceStr, 10, 64)
+	if balanceCasino <= minBalance || balanceCasino <= amount*10 {
+		chance = 0
+	}
+	return chance
+}
+
+func (s Service) processLoss(id, amount, balance, balanceCasino int64) (int64, error) {
+	newBalance, err := s.User.SetUserBalance(id, balance-amount)
 	if err != nil {
-		return false, nil, 0, 0, err
+		return 0, err
+	}
+	_, err = s.User.SetUserBalance(1, balanceCasino+amount)
+	if err != nil {
+		return 0, err
+	}
+	return newBalance, nil
+}
+
+func (s Service) processWin(id, amount, newAmount, balance, balanceCasino int64) (int64, error) {
+	newBalance, err := s.User.SetUserBalance(id, balance+newAmount-amount)
+	if err != nil {
+		return 0, err
+	}
+	_, err = s.User.SetUserBalance(1, balanceCasino-newAmount+amount)
+	if err != nil {
+		return 0, err
+	}
+	return newBalance, nil
+}
+
+func (s Service) Slots(id, amount int64) (bool, bool, []string, int64, int64, error) {
+	balance, err := s.User.GetUserBalance(id)
+	if err != nil {
+		return false, true, nil, 0, 0, err
 	}
 
-	if balance < int64(amount) {
-		return false, nil, 0, balance, errors.New("недостаточно средств")
+	if balance < amount {
+		return false, true, nil, 0, balance, errors.New(constants.ErrLackBalance)
 	}
 
 	symbols := []string{
@@ -50,37 +96,22 @@ func (s Service) Slots(id int64, amount int) (bool, []string, int, int64, error)
 		"7️⃣",
 	}
 
-	balanceCasinoStr, err := cache.Rdb.Get(cache.Ctx, "user:1:balance").Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		logger.Warn("Ошибка нахождения баланса казино", zap.Error(err))
+	balanceCasino, err := s.User.GetUserBalance(1)
+	if err != nil {
+		return false, true, nil, 0, 0, err
 	}
-	balanceCasino, err := strconv.ParseInt(balanceCasinoStr, 10, 64)
 
-	var win bool
+	var newAmount, newBalance int64
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	result := []string{
 		symbols[rng.Intn(len(symbols))],
 		symbols[rng.Intn(len(symbols))],
 		symbols[rng.Intn(len(symbols))],
 	}
-
-	maxChance := 100           // Максимальный шанс выигрыша в процентах (100%)
-	minChance := 0             // Минимальный шанс выигрыша в процентах (0%)
-	maxBalance := int64(50000) // Баланс для 100% шанса выигрыша
-	minBalance := int64(5000)  // Баланс для 0% шанса выигрыша
-	chance := int(float64(balanceCasino-minBalance) / float64(maxBalance-minBalance) * float64(maxChance-minChance))
-	if balanceCasino >= maxBalance {
-		chance = 100
-	}
-	if balanceCasino <= minBalance {
-		chance = 0
-	}
+	chance := calculateWinChance(balanceCasino, amount)
 
 	randomNumber := rng.Intn(100)
-
-	if randomNumber > chance { // проигрыш
-		win = false
-
+	if int64(randomNumber) > chance { // проигрыш
 		for {
 			if (result[0] == result[1] && result[1] == result[2]) || (result[0] == result[1] || result[1] == result[2]) {
 				result = []string{
@@ -93,68 +124,271 @@ func (s Service) Slots(id int64, amount int) (bool, []string, int, int64, error)
 			}
 		}
 
-		balance, err = s.User.SetUserBalance(id, balance-int64(amount))
+		newBalance, err = s.processLoss(id, amount, balance, balanceCasino)
 		if err != nil {
-			return false, nil, 0, 0, err
+			return false, true, nil, 0, 0, err
 		}
+	} else if result[0] == result[1] || result[1] == result[2] {
+		newAmount = amount * 2
 
-		_, err = s.User.SetUserBalance(1, balanceCasino+int64(amount))
-		if err != nil {
-			return false, nil, 0, 0, err
-		}
-
-		return win, result, amount, balance, nil
-	} else {
 		if result[0] == result[1] && result[1] == result[2] {
-			win = true
-			// Все символы совпадают
 			switch result[0] {
 			case "7️⃣":
-				amount *= 100
+				newAmount = amount * 100
 			case "🔔":
-				amount *= 20
+				newAmount = amount * 20
 			default:
-				amount *= 10
+				newAmount = amount * 10
 			}
+		}
 
-			balance, err = s.User.SetUserBalance(id, balance+int64(amount))
-			if err != nil {
-				return false, nil, 0, 0, err
+		newBalance, err = s.processWin(id, amount, newAmount, balance, balanceCasino)
+		if err != nil {
+			return false, true, nil, 0, 0, err
+		}
+	} else {
+		newBalance, err = s.processLoss(id, amount, balance, balanceCasino)
+		if err != nil {
+			return false, true, nil, 0, 0, err
+		}
+	}
+
+	return newAmount > 0, int64(randomNumber) > chance, result, amount, newBalance, nil
+}
+
+func (s Service) RouletteNum(id, number, amount int64) (bool, bool, int64, int64, int64, error) {
+	balance, err := s.User.GetUserBalance(id)
+	if err != nil {
+		return false, true, 0, 0, 0, err
+	}
+
+	if balance < amount {
+		return false, true, 0, 0, balance, errors.New(constants.ErrLackBalance)
+	}
+
+	balanceCasino, err := s.User.GetUserBalance(1)
+	if err != nil {
+		return false, true, 0, 0, 0, err
+	}
+
+	var newAmount, newBalance int64
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	chance := calculateWinChance(balanceCasino, amount)
+	result := rng.Intn(36)
+
+	randomNumber := rng.Intn(100)
+	if int64(randomNumber) > chance {
+		for {
+			if int64(result+1) == number {
+				result = rng.Intn(36)
+			} else {
+				break
 			}
+		}
 
-			_, err = s.User.SetUserBalance(1, balanceCasino-int64(amount))
-			if err != nil {
-				return false, nil, 0, 0, err
+		newBalance, err = s.processLoss(id, amount, balance, balanceCasino)
+		if err != nil {
+			return false, true, 0, 0, 0, err
+		}
+	} else if int64(result+1) == number {
+		newAmount = amount * 35
+
+		newBalance, err = s.processWin(id, amount, newAmount, balance, balanceCasino)
+		if err != nil {
+			return false, true, 0, 0, 0, err
+		}
+	} else {
+		newBalance, err = s.processLoss(id, amount, balance, balanceCasino)
+		if err != nil {
+			return false, true, 0, 0, 0, err
+		}
+	}
+
+	return newAmount > 0, int64(randomNumber) > chance, int64(result + 1), newAmount, newBalance, nil
+}
+
+func (s Service) RouletteColor(id int64, color int64, amount int64) (bool, bool, string, int64, int64, error) {
+	balance, err := s.User.GetUserBalance(id)
+	if err != nil {
+		return false, true, "", 0, 0, err
+	}
+
+	if balance < amount {
+		return false, true, "", 0, balance, errors.New(constants.ErrLackBalance)
+	}
+
+	balanceCasino, err := s.User.GetUserBalance(1)
+	if err != nil {
+		return false, true, "", 0, 0, err
+	}
+
+	var newAmount, newBalance int64
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	chance := calculateWinChance(balanceCasino, amount)
+	result := rng.Intn(36)
+
+	randomNumber := rng.Intn(100)
+	if int64(randomNumber) > chance {
+		for {
+			if (result+1 == 0 && color == 0) || ((result+1)%2 == 0 && color == 1) || ((result+1)%2 != 0 && color == 2) {
+				result = rng.Intn(36)
+			} else {
+				break
 			}
-		} else if result[0] == result[1] || result[1] == result[2] {
-			win = true
-			amount *= 2
+		}
 
-			balance, err = s.User.SetUserBalance(id, balance+int64(amount))
-			if err != nil {
-				return false, nil, 0, 0, err
-			}
+		newBalance, err = s.processLoss(id, amount, balance, balanceCasino)
+		if err != nil {
+			return false, true, "", 0, 0, err
+		}
+	} else {
+		if result+1 == 0 && color == 0 { // зеленое
+			newAmount = amount * 35
+		} else if (result+1)%2 == 0 && color == 1 { // черное
+			newAmount = amount * 2
+		} else if (result+1)%2 != 0 && color == 2 { // красное
+			newAmount = amount * 2
+		}
 
-			_, err = s.User.SetUserBalance(1, balanceCasino-int64(amount))
+		if newAmount != 0 {
+			newBalance, err = s.processWin(id, amount, newAmount, balance, balanceCasino)
 			if err != nil {
-				return false, nil, 0, 0, err
+				return false, true, "", 0, 0, err
 			}
 		} else {
-			win = false
-
-			balance, err = s.User.SetUserBalance(id, balance-int64(amount))
+			newBalance, err = s.processLoss(id, amount, balance, balanceCasino)
 			if err != nil {
-				return false, nil, 0, 0, err
-			}
-
-			_, err = s.User.SetUserBalance(1, balanceCasino+int64(amount))
-			if err != nil {
-				return false, nil, 0, 0, err
+				return false, true, "", 0, 0, err
 			}
 		}
 	}
 
-	return win, result, amount, balance, nil
+	var colorStr string
+	if result+1 == 0 { // зеленое
+		colorStr = fmt.Sprintf("🟩%d", result+1)
+	} else if (result+1)%2 == 0 { // черное
+		colorStr = fmt.Sprintf("⬛%d", result+1)
+	} else if (result+1)%2 != 0 { // красное
+		colorStr = fmt.Sprintf("🟥%d", result+1)
+	}
+
+	return newAmount > 0, int64(randomNumber) > chance, colorStr, newAmount, newBalance, nil
+}
+
+func (s Service) Dice(id, number, amount int64) (bool, bool, []int64, int64, int64, error) {
+	balance, err := s.User.GetUserBalance(id)
+	if err != nil {
+		return false, true, nil, 0, 0, err
+	}
+
+	if balance < amount {
+		return false, true, nil, 0, balance, errors.New(constants.ErrLackBalance)
+	}
+
+	balanceCasino, err := s.User.GetUserBalance(1)
+	if err != nil {
+		return false, true, nil, 0, 0, err
+	}
+
+	var newAmount, newBalance int64
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	chance := calculateWinChance(balanceCasino, amount)
+	resultOne := rng.Intn(6) + 1
+	resultTwo := rng.Intn(6) + 1
+	result := []int64{int64(resultOne), int64(resultTwo)}
+
+	randomNumber := rng.Intn(100)
+	if int64(randomNumber) > chance {
+		for {
+			if int64(resultOne+resultTwo) == number {
+				resultOne = rng.Intn(6) + 1
+				resultTwo = rng.Intn(6) + 1
+				result = []int64{int64(resultOne), int64(resultTwo)}
+			} else {
+				break
+			}
+		}
+
+		newBalance, err = s.processLoss(id, amount, balance, balanceCasino)
+		if err != nil {
+			return false, true, nil, 0, 0, err
+		}
+	} else if int64(resultOne+resultTwo) == number {
+		newAmount = amount * 12
+
+		newBalance, err = s.processWin(id, amount, newAmount, balance, balanceCasino)
+		if err != nil {
+			return false, true, nil, 0, 0, err
+		}
+	} else {
+		newBalance, err = s.processLoss(id, amount, balance, balanceCasino)
+		if err != nil {
+			return false, true, nil, 0, 0, err
+		}
+	}
+
+	return newAmount > 0, int64(randomNumber) > chance, result, newAmount, newBalance, nil
+}
+
+func (s Service) RockPaperScissors(id, number, amount int64) (bool, bool, string, int64, int64, error) {
+	balance, err := s.User.GetUserBalance(id)
+	if err != nil {
+		return false, true, "", 0, 0, err
+	}
+
+	if balance < amount {
+		return false, true, "", 0, balance, errors.New(constants.ErrLackBalance)
+	}
+
+	balanceCasino, err := s.User.GetUserBalance(1)
+	if err != nil {
+		return false, true, "", 0, 0, err
+	}
+
+	var newAmount, newBalance int64
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	chance := calculateWinChance(balanceCasino, amount)
+	result := rng.Intn(3) + 1
+
+	randomNumber := rng.Intn(100)
+	if int64(randomNumber) > chance {
+		for {
+			if int64(result) == number {
+				result = rng.Intn(3) + 1
+			} else {
+				break
+			}
+		}
+
+		newBalance, err = s.processLoss(id, amount, balance, balanceCasino)
+		if err != nil {
+			return false, true, "", 0, 0, err
+		}
+	} else if int64(result) == number {
+		newAmount = amount * 3
+
+		newBalance, err = s.processWin(id, amount, newAmount, balance, balanceCasino)
+		if err != nil {
+			return false, true, "", 0, 0, err
+		}
+	} else {
+		newBalance, err = s.processLoss(id, amount, balance, balanceCasino)
+		if err != nil {
+			return false, true, "", 0, 0, err
+		}
+	}
+
+	var choice string
+	switch result {
+	case 1:
+		choice = "камень"
+	case 2:
+		choice = "ножницы"
+	case 3:
+		choice = "бумага"
+	}
+
+	return newAmount > 0, int64(randomNumber) > chance, choice, newAmount, newBalance, nil
 }
 
 func (s Service) Steal(to string, from string, amount int) (bool, int64, error) {
@@ -207,7 +441,7 @@ func (s Service) Steal(to string, from string, amount int) (bool, int64, error) 
 		return false, 0, errors.New("неизвестная ошибка, обратитесь к администратору")
 	}
 
-	if randomNumber < chance/3 {
+	if randomNumber < chance/5 {
 		balance, err := s.User.SetUserBalance(dataFrom["id"].(int64), balanceFrom+int64(amount))
 		if err != nil {
 			return false, balanceFrom, err
@@ -227,4 +461,118 @@ func (s Service) Steal(to string, from string, amount int) (bool, int64, error) 
 
 		return false, balance, nil
 	}
+}
+
+func (s Service) SelfMute(id int64, durationStr string) (int64, int64, error) {
+	balance, err := s.User.GetUserBalance(id)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	duration, err := s.Mute.GetDuration(durationStr)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	amount, err := s.Mute.GetAmount("selfmute", duration)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var mute models.Mute
+	cacheKey := fmt.Sprintf("user:%d:selfmute", id)
+	jsonMute, err := cache.Rdb.Get(cache.Ctx, cacheKey).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return 0, 0, err
+	}
+
+	if jsonMute != "" {
+		err = json.Unmarshal([]byte(jsonMute), &mute)
+		if err != nil {
+			return 0, 0, err
+		}
+
+		if mute != (models.Mute{}) {
+			jsonStartMute, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", mute.StartMute)
+			if err != nil {
+				return 0, 0, err
+			}
+			jsonDuration := time.Duration(mute.Duration)
+
+			startMute := time.Now().UTC()
+			oldDuration := startMute.Sub(jsonStartMute)
+
+			jsonDuration -= oldDuration
+			jsonDuration += duration
+			jsonStartMute = startMute
+
+			mute.StartMute = fmt.Sprint(jsonStartMute)
+			mute.Duration = int64(jsonDuration)
+		} else {
+			mute.StartMute = fmt.Sprint(time.Now().UTC())
+			mute.Duration = int64(duration)
+		}
+	} else {
+		mute.StartMute = fmt.Sprint(time.Now().UTC())
+		mute.Duration = int64(duration)
+	}
+
+	newBalance, err := s.User.SetUserBalance(id, balance+int64(amount))
+	if err != nil {
+		return 0, 0, err
+	}
+
+	strMute, err := json.Marshal(mute)
+	err = cache.Rdb.Set(cache.Ctx, cacheKey, strMute, time.Duration(mute.Duration)).Err()
+	if err != nil {
+		return 0, 0, errors.New("неизвестная ошибка, обратитесь к администратору")
+	}
+
+	return newBalance, int64(amount), nil
+}
+
+func (s Service) SelfUnmute(id int64) (int64, int64, error) {
+	balance, err := s.User.GetUserBalance(id)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var mute models.Mute
+	cacheKey := fmt.Sprintf("user:%d:selfmute", id)
+	jsonMute, err := cache.Rdb.Get(cache.Ctx, cacheKey).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return 0, 0, err
+	}
+
+	var amount int
+	var newBalance int64
+	if jsonMute != "" {
+		err = json.Unmarshal([]byte(jsonMute), &mute)
+		if err != nil {
+			return 0, 0, err
+		}
+
+		if mute != (models.Mute{}) {
+			amount, err = s.Mute.GetAmount("selfmute", time.Duration(mute.Duration))
+			if err != nil {
+				return 0, 0, err
+			}
+
+			newBalance, err = s.User.SetUserBalance(id, balance-int64(amount))
+			if err != nil {
+				return 0, 0, err
+			}
+
+			err = cache.Rdb.Del(cache.Ctx, cacheKey).Err()
+			if err != nil {
+				return 0, 0, err
+			}
+		} else {
+			return 0, 0, errors.New("вы не в муте")
+		}
+	} else {
+		return 0, 0, errors.New("вы не в муте")
+	}
+
+	return newBalance, int64(amount), nil
 }

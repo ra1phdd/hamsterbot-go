@@ -1,66 +1,218 @@
-version: '3.8'
-
 services:
-  kinogo:
-    container_name: raspygk
-    build:
-      context: .
-      target: dev
-      network: host
+  postgres:
+    container_name: postgres
+    image: postgres:latest
+    restart: unless-stopped
     volumes:
-      - ./:/app
-    extra_hosts:
-      - "postgres:91.215.21.236"
+      - postgres_data:/var/lib/postgresql/data
     ports:
-      - "4000:4000"
+      - 5432:5432
+    networks:
+      - db
+    environment:
+      POSTGRES_PASSWORD: 56228478
+
+  redis:
+    container_name: redis
+    image: redis:latest
+    restart: unless-stopped
+    volumes:
+      - /home/ra1ph/conf/redis.conf:/usr/local/etc/redis/redis.conf
+    ports:
+      - 6379:6379
+    networks:
+      - db
+    command: [ "redis-server", "/usr/local/etc/redis/redis.conf", "--ignore-warnings", "ARM64-COW-BUG" ]
 
   grafana:
-    image: grafana/grafana-oss
     container_name: grafana
+    image: grafana/grafana:latest
     restart: unless-stopped
     volumes:
-      - ./internal/config/grafana/:/var/lib/grafana
-    extra_hosts:
-      - "postgres:192.168.1.1"
+      - grafana_data:/var/lib/grafana
     ports:
-      - '3000:3000'
+      - 9000:3000
+    networks:
+      - metrics
 
   prometheus:
-    image: prom/prometheus:latest
     container_name: prometheus
+    image: bitnami/prometheus:latest
+    restart: unless-stopped
     volumes:
-      - ./internal/config/prometheus/:/etc/prometheus/
-    hostname: prometheus
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
+      - /home/ra1ph/conf/prometheus.conf:/etc/prometheus/prometheus.conf
+      - /home/ra1ph/conf/alert_rules.conf:/etc/prometheus/alert_rules.conf
     ports:
       - 9090:9090
-    restart: unless-stopped
+    networks:
+      - metrics
     environment:
-      TZ: "Europe/Moscow"
+      TZ: Europe/Moscow
+    command: --config.file=/etc/prometheus/prometheus.yml
+
+  alertmanager:
+    image: bitnami/alertmanager:latest
+    container_name: alertmanager
+    restart: unless-stopped
+    volumes:
+      - /home/ra1ph/conf/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+      - /home/ra1ph/conf/alertmanager-template.yml:/etc/alertmanager/template/alertmanager-template.yml
+    ports:
+      - 9080:9080
+    networks:
+      - metrics
+    command: --config.file=/etc/alertmanager/alertmanager.yml
 
   loki:
-    image: grafana/loki:latest
     container_name: loki
+    image: grafana/loki:latest
+    restart: unless-stopped
+    volumes:
+      - loki_data:/etc/loki
+      - /home/ra1ph/conf/loki.yml:/etc/loki/loki.yml
     ports:
-      - "3100:3100"
-    command: -config.file=/etc/loki/local-config.yaml
+      - 9070:9070
+    networks:
+      - metrics
+    command: -config.file=/etc/loki/loki.yml
 
   promtail:
-    image: grafana/promtail:latest
     container_name: promtail
-    ports:
-      - "9080:9080"
+    image: grafana/promtail:latest
+    restart: unless-stopped
     volumes:
-      - ./logs/:/var/log
-    command: -config.file=/etc/promtail/config.yml
+      - /home/ra1ph/conf/promtail.yml:/etc/promtail/promtail.yml
+      - promtail_positions:/tmp/positions.yaml
+    ports:
+      - 9060:9060
+    networks:
+      - metrics
+    depends_on:
+      - loki
+    command: -config.file=/etc/promtail/promtail.yml
+
+  node-exporter:
+    container_name: node-exporter
+    image: prom/node-exporter:latest
+    restart: unless-stopped
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    networks:
+      - metrics
+    depends_on:
+      - prometheus
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --collector.filesystem.ignored-mount-points="^/(sys|proc|dev|host|etc)($$|/)"
 
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter
     container_name: postgres-exporter
-    ports:
-      - "9187:9187"
-    environment:
-      DATA_SOURCE_NAME: "postgresql://postgres:RalphDeadwave562208@91.215.21.236:5432/kinogo_db?sslmode=disable"
-    links:
+    image: prometheuscommunity/postgres-exporter:latest
+    restart: unless-stopped
+    networks:
+      - metrics
+      - db
+    depends_on:
+      - postgres
       - prometheus
+    environment:
+      DATA_SOURCE_NAME: "postgresql://postgres:56228478@postgres:5432/kinogo_db?sslmode=disable"
+
+  redis-exporter:
+    container_name: redis-exporter
+    image: oliver006/redis_exporter:latest
+    restart: unless-stopped
+    networks:
+      - metrics
+      - db
+    depends_on:
+      - redis
+      - prometheus
+    environment:
+      - REDIS_ADDR=redis:6379
+
+  jackett:
+    container_name: jackett
+    image: lscr.io/linuxserver/jackett:latest
+    restart: unless-stopped
+    volumes:
+      - jackett_data:/config
+    ports:
+      - 9117:9117
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/Moscow
+      - AUTO_UPDATE=true
+
+  getytstatsapi:
+    container_name: GetYTStatsAPI
+    build:
+      context: .
+      dockerfile: /home/ra1ph/GetYTStatsAPI/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - /home/ra1ph/GetYTStatsAPI/:/app
+    ports:
+      - 8089:8089
+    networks:
+      - db
+    depends_on:
+      - redis
+
+  stream-recorder:
+    container_name: stream-recorder
+    build:
+      context: .
+      dockerfile: /home/ra1ph/stream-recorder/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - /home/ra1ph/stream-recorder/:/app
+      - /mnt:/app/mnt
+    ports:
+      - 8000:8000
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+
+#  raspygk:
+#    container_name: raspygk
+#    build:
+#      context: .
+#      dockerfile: /home/ra1ph/RaspYGK-go/Dockerfile
+#    restart: unless-stopped
+#    volumes:
+#      - /home/ra1ph/RaspYGK-go/:/app
+#    networks:
+#      - db
+#    depends_on:
+#      - postgres
+#      - redis
+
+  hamsterbot:
+    container_name: hamsterbot
+    build:
+      context: .
+      dockerfile: /home/ra1ph/hamsterbot/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - /home/ra1ph/hamsterbot/:/app
+    networks:
+      - db
+    depends_on:
+      - postgres
+      - redis
+
+volumes:
+  postgres_data:
+  grafana_data:
+  loki_data:
+  promtail_positions:
+  jackett_data:
+
+networks:
+  db:
+  metrics:

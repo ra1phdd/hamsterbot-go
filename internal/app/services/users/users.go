@@ -10,8 +10,10 @@ import (
 	"hamsterbot/pkg/cache"
 	"hamsterbot/pkg/db"
 	"hamsterbot/pkg/logger"
+	"log"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Service struct{}
@@ -22,7 +24,7 @@ func New() *Service {
 
 func (s Service) GetUserById(id int64) (map[string]interface{}, error) {
 	cacheKey := fmt.Sprintf("user:%d", id)
-	fields := []string{"username", "balance", "lvl", "income", "mute"}
+	fields := []string{"username", "balance", "lvl", "income", "mute", "selfmute"}
 	data := map[string]interface{}{"id": id}
 	var err error
 
@@ -42,7 +44,7 @@ func (s Service) GetUserById(id int64) (map[string]interface{}, error) {
 				return nil, convErr
 			}
 			data[field] = value
-		case "mute":
+		case "mute", "selfmute":
 			var mute models.Mute
 			if cacheValue != "" {
 				err := json.Unmarshal([]byte(cacheValue), &mute)
@@ -75,6 +77,7 @@ func (s Service) GetUserById(id int64) (map[string]interface{}, error) {
 		"lvl":      lvl,
 		"income":   income,
 		"mute":     models.Mute{},
+		"selfmute": models.Mute{},
 	}
 
 	err = cache.Rdb.Set(cache.Ctx, fmt.Sprintf("username:%s", username), id, 0).Err()
@@ -86,7 +89,7 @@ func (s Service) GetUserById(id int64) (map[string]interface{}, error) {
 			continue
 		} else if field == "username" {
 			value = strings.Trim(username, "@")
-		} else if field == "mute" {
+		} else if field == "mute" || field == "selfmute" {
 			value, err = json.Marshal(models.Mute{})
 			if err != nil {
 				return nil, err
@@ -138,6 +141,7 @@ func (s Service) GetUserByUsername(username string) (map[string]interface{}, err
 		"lvl":      lvl,
 		"income":   income,
 		"mute":     models.Mute{},
+		"selfmute": models.Mute{},
 	}
 
 	cacheKey := fmt.Sprintf("user:%d", id)
@@ -150,7 +154,7 @@ func (s Service) GetUserByUsername(username string) (map[string]interface{}, err
 			continue
 		} else if field == "username" {
 			value = strings.Trim(username, "@")
-		} else if field == "mute" {
+		} else if field == "mute" || field == "selfmute" {
 			value, err = json.Marshal(models.Mute{})
 			if err != nil {
 				return nil, err
@@ -164,6 +168,19 @@ func (s Service) GetUserByUsername(username string) (map[string]interface{}, err
 	}
 
 	return data, nil
+}
+
+func (s Service) GetUserBalance(id int64) (int64, error) {
+	balanceStr, err := cache.Rdb.Get(cache.Ctx, fmt.Sprintf("user:%d:balance", id)).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return 0, err
+	}
+	balance, err := strconv.ParseInt(balanceStr, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return balance, nil
 }
 
 func (s Service) SetUserBalance(id int64, balance int64) (int64, error) {
@@ -231,4 +248,150 @@ func (s Service) AddUser(id int64, username string) error {
 	defer rows.Close()
 
 	return nil
+}
+
+func (s Service) GetTopByBalance() ([]models.UserTop, error) {
+	var top []models.UserTop
+	cacheValue, err := cache.Rdb.Get(cache.Ctx, "top:balance").Result()
+	if err == nil && cacheValue != "" {
+		err = json.Unmarshal([]byte(cacheValue), &top)
+		if err != nil {
+			log.Printf("Ошибка десериализации: %v", err)
+		}
+		return top, nil
+	} else if !errors.Is(err, redis.Nil) {
+		// Если ошибка не связана с отсутствием ключа, логируем её
+		log.Printf("Ошибка при получении данных из Redis: %v", err)
+	}
+
+	rows, err := db.Conn.Query(`SELECT username, balance FROM users WHERE username NOT LIKE 'bank%' ORDER by balance DESC LIMIT 10`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var user models.UserTop
+		errScan := rows.Scan(&user.Username, &user.Value)
+		if errScan != nil {
+			return nil, errScan
+		}
+
+		top = append(top, user)
+	}
+
+	cacheValueByte, err := json.Marshal(top)
+	if err != nil {
+		return nil, err
+	}
+	err = cache.Rdb.Set(cache.Ctx, "top:balance", cacheValueByte, 5*time.Minute).Err()
+	if err != nil {
+		log.Printf("Ошибка при сохранении данных в Redis: %v", err)
+	}
+
+	return top, nil
+}
+
+func (s Service) GetTopByLVL() ([]models.UserTop, error) {
+	var top []models.UserTop
+	cacheValue, err := cache.Rdb.Get(cache.Ctx, "top:lvl").Result()
+	if err == nil && cacheValue != "" {
+		err = json.Unmarshal([]byte(cacheValue), &top)
+		if err != nil {
+			log.Printf("Ошибка десериализации: %v", err)
+		}
+		return top, nil
+	} else if !errors.Is(err, redis.Nil) {
+		// Если ошибка не связана с отсутствием ключа, логируем её
+		log.Printf("Ошибка при получении данных из Redis: %v", err)
+	}
+
+	rows, err := db.Conn.Query(`SELECT username, lvl FROM users WHERE username NOT LIKE 'bank%' ORDER by lvl DESC LIMIT 10`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var user models.UserTop
+		errScan := rows.Scan(&user.Username, &user.Value)
+		if errScan != nil {
+			return nil, errScan
+		}
+
+		top = append(top, user)
+	}
+
+	cacheValueByte, err := json.Marshal(top)
+	if err != nil {
+		return nil, err
+	}
+	err = cache.Rdb.Set(cache.Ctx, "top:lvl", cacheValueByte, 5*time.Minute).Err()
+	if err != nil {
+		log.Printf("Ошибка при сохранении данных в Redis: %v", err)
+	}
+
+	return top, nil
+}
+
+func (s Service) GetTopByIncome() ([]models.UserTop, error) {
+	var top []models.UserTop
+	cacheValue, err := cache.Rdb.Get(cache.Ctx, "top:income").Result()
+	if err == nil && cacheValue != "" {
+		err = json.Unmarshal([]byte(cacheValue), &top)
+		if err != nil {
+			log.Printf("Ошибка десериализации: %v", err)
+		}
+		return top, nil
+	} else if !errors.Is(err, redis.Nil) {
+		// Если ошибка не связана с отсутствием ключа, логируем её
+		log.Printf("Ошибка при получении данных из Redis: %v", err)
+	}
+
+	rows, err := db.Conn.Query(`SELECT username, income FROM users WHERE username NOT LIKE 'bank%' ORDER by income DESC LIMIT 10`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var user models.UserTop
+		errScan := rows.Scan(&user.Username, &user.Value)
+		if errScan != nil {
+			return nil, errScan
+		}
+
+		top = append(top, user)
+	}
+
+	cacheValueByte, err := json.Marshal(top)
+	if err != nil {
+		return nil, err
+	}
+	err = cache.Rdb.Set(cache.Ctx, "top:income", cacheValueByte, 5*time.Minute).Err()
+	if err != nil {
+		log.Printf("Ошибка при сохранении данных в Redis: %v", err)
+	}
+
+	return top, nil
+}
+
+func (s Service) GetBankBalance() (map[string]interface{}, error) {
+	bankBalance, err := s.GetUserById(1)
+	if err != nil {
+		return nil, err
+	}
+
+	var usersBankBalance int64
+	query := `SELECT SUM(balance) FROM users WHERE username LIKE 'bank_%'`
+	err = db.Conn.QueryRowx(query).Scan(&usersBankBalance)
+	if err != nil {
+		logger.Error("ошибка при выборке данных из таблицы users в функции getUserData", zap.Error(err))
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"bank":  bankBalance["balance"].(int64),
+		"users": usersBankBalance,
+	}, nil
 }

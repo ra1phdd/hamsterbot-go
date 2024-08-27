@@ -32,7 +32,10 @@ func (e *Endpoint) MuteHandler(c telebot.Context) error {
 		return c.Send("Неверный формат команды. Пожалуйста, используйте: /mute <username> <время> или ответьте командой /mute <время> время на сообщение.")
 	}
 
-	logger.Debug("Получение аргументов", zap.String("username", username), zap.String("duration", duration))
+	//if duration == "0s" {
+	//	return c.Send("Ошибка: длина мута не может быть меньше 1s.")
+	//}
+
 	balance, amount, err := e.Mute.Mute(username, c.Sender().Username, duration)
 	if err != nil {
 		if err.Error() == "недостаточно средств" {
@@ -41,6 +44,8 @@ func (e *Endpoint) MuteHandler(c telebot.Context) error {
 		return c.Send(fmt.Sprintf("Ошибка: %s.", err.Error()))
 	}
 
+	logger.Infof(fmt.Sprintf("Пользователь @%s (%d) замутил пользователя @%s", c.Sender().Username, c.Sender().ID, strings.Trim(username, "@")),
+		c.Chat().ID, c.Chat().Title, zap.String("duration", duration), zap.Int("amount", amount), zap.Int64("balance", balance))
 	return c.Send(fmt.Sprintf("Пользователь @%s замучен на %s за %d зеток. Ваш текущий баланс: %d зеток.", strings.Trim(username, "@"), duration, amount, balance))
 }
 
@@ -70,5 +75,7 @@ func (e *Endpoint) UnmuteHandler(c telebot.Context) error {
 		return c.Send(fmt.Sprintf("Ошибка: %s.", err.Error()))
 	}
 
+	logger.Infof(fmt.Sprintf("Пользователь @%s (%d) размутил пользователя @%s", c.Sender().Username, c.Sender().ID, strings.Trim(username, "@")),
+		c.Chat().ID, c.Chat().Title, zap.Int("amount", amount), zap.Int64("balance", balance))
 	return c.Send(fmt.Sprintf("Пользователь @%s размучен за %d зеток. Ваш текущий баланс: %d зеток.", strings.Trim(username, "@"), amount, balance))
 }

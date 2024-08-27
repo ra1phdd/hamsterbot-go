@@ -24,6 +24,11 @@ func (e *Endpoint) IsUser(next tele.HandlerFunc) tele.HandlerFunc {
 			return c.Send("Вы заблокированы до выяснения обстоятельств.")
 		}*/
 
+		/* dev-ветка, ЗАКОММЕНТИРОВАТЬ НА РЕЛИЗЕ */
+		//if c.Sender().ID != 1230045591 {
+		//	return nil
+		//}
+
 		data, err := e.User.GetUserById(c.Sender().ID)
 		if err != nil {
 			err := e.User.AddUser(c.Sender().ID, c.Sender().Username)
@@ -35,7 +40,7 @@ func (e *Endpoint) IsUser(next tele.HandlerFunc) tele.HandlerFunc {
 			return next(c)
 		}
 
-		if data["mute"].(models.Mute) != (models.Mute{}) {
+		if data["mute"].(models.Mute) != (models.Mute{}) || data["selfmute"].(models.Mute) != (models.Mute{}) {
 			err := e.Bot.Delete(c.Message())
 			if err != nil {
 				return err

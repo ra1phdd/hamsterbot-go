@@ -29,7 +29,7 @@ func New(User User) *Service {
 	}
 }
 
-func GetDuration(durationStr string) (time.Duration, error) {
+func (s Service) GetDuration(durationStr string) (time.Duration, error) {
 	logger.Debug("Получение длительности мута", zap.String("duration", durationStr))
 
 	re := regexp.MustCompile(`^(\d+)([smh])$`)
@@ -61,7 +61,7 @@ func GetDuration(durationStr string) (time.Duration, error) {
 	return duration, nil
 }
 
-func GetAmount(typeMute string, duration time.Duration) (int, error) {
+func (s Service) GetAmount(typeMute string, duration time.Duration) (int, error) {
 	logger.Debug("Получение стоимости мута", zap.String("type", typeMute), zap.Any("duration", duration))
 
 	var ratioSecond, ratioMinute, ratioHour int
@@ -74,6 +74,10 @@ func GetAmount(typeMute string, duration time.Duration) (int, error) {
 		ratioSecond = 5
 		ratioMinute = 3
 		ratioHour = 2
+	case "selfmute":
+		ratioSecond = 1
+		ratioMinute = 1
+		ratioHour = 1
 	}
 
 	var amount int
@@ -104,12 +108,12 @@ func (s Service) Mute(to string, from string, durationStr string) (int64, int, e
 		return 0, 0, err
 	}
 
-	duration, err := GetDuration(durationStr)
+	duration, err := s.GetDuration(durationStr)
 	if err != nil {
 		return 0, 0, err
 	}
 
-	amount, err := GetAmount("mute", duration)
+	amount, err := s.GetAmount("mute", duration)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -214,7 +218,7 @@ func (s Service) Unmute(from string, to string) (int64, int, error) {
 		return 0, 0, fmt.Errorf("пользователь не в муте")
 	}
 
-	amount, err := GetAmount("unmute", time.Duration(mute.Duration))
+	amount, err := s.GetAmount("unmute", time.Duration(mute.Duration))
 	if err != nil {
 		return 0, 0, err
 	}

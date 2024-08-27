@@ -19,7 +19,7 @@ func New(User User) *Service {
 	}
 }
 
-func (s Service) Pay(to string, from string, amount int) (int64, error) {
+func (s Service) Pay(from string, to string, amount int) (int64, error) {
 	dataTo, err := s.User.GetUserByUsername(to)
 	if err != nil {
 		return 0, err
